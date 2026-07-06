@@ -306,8 +306,6 @@ const SystemParametersInfoA = user32.func(/* c */ `BOOL __stdcall SystemParamete
 
 const SPI_GETFOREGROUNDLOCKTIMEOUT = 0x2000;
 const SPI_SETFOREGROUNDLOCKTIMEOUT = 0x2001;
-const SPIF_UPDATEINIFILE = 0x01;
-const SPIF_SENDWININICHANGE = 0x02;
 // end TODO
 
 const GetWindowThreadProcessId = user32.func(/* c */ `DWORD __stdcall GetWindowThreadProcessId(HWND hWnd, _Out_ LPDWORD lpdwProcessId)`) as (hWnd: HWND, lpdwProcessId: [LPDWORD | null]) => DWORD;
@@ -318,6 +316,8 @@ const SetForegroundWindow = user32.func(/* c */ `BOOL __stdcall SetForegroundWin
 const GetMessageExtraInfo = user32.func(/* c */ `LPARAM __stdcall GetMessageExtraInfo()`) as () => LPARAM;
 const WindowFromPoint = user32.func(/* c */ `HWND __stdcall WindowFromPoint(POINT point)`) as (point: Point) => HWND;
 const AttachThreadInput = user32.func(/* c */ `BOOL __stdcall AttachThreadInput(DWORD idAttach, DWORD idAttachTo, BOOL fAttach)`) as (idAttach: DWORD, idAttachTo: DWORD, fAttach: BOOL) => BOOL;
+const GetAncestor = user32.func(/* c */ `HWND __stdcall GetAncestor(HWND hwnd, unsigned int gaFlags)`) as (hwnd: HWND, gaFlags: number) => HWND;
+const GA_ROOT = 2;
 const GetCurrentThreadId = kernel32.func(/* c */ `DWORD __stdcall GetCurrentThreadId()`) as () => DWORD;
 
 function makeKeyboardEvent(args: {
@@ -889,16 +889,35 @@ export function getHwndByPoint(x: number, y: number): HWND | null {
     return hwnd || null;
 }
 
+/**
+ * Bring a window to the foreground, temporarily lifting the foreground lock timeout.
+ *
+ * The timeout is changed IN MEMORY ONLY (fWinIni = 0). Passing
+ * SPIF_UPDATEINIFILE | SPIF_SENDWININICHANGE (as this code used to) persists the
+ * value to the user profile and broadcasts WM_SETTINGCHANGE to every top-level
+ * window, which costs on the order of a second per call — far too expensive to run
+ * around every simulated mouse press (see issue #84).
+ */
+function forceSetForegroundWindow(hwnd: HWND): boolean {
+    const previousTimeout: [number] = [0];
+    SystemParametersInfoA(SPI_GETFOREGROUNDLOCKTIMEOUT, 0, previousTimeout, 0);
+    SystemParametersInfoA(SPI_SETFOREGROUNDLOCKTIMEOUT, 0, [0], 0);
+
+    let isSuccessful = false;
+    try {
+        isSuccessful = SetForegroundWindow(hwnd);
+    } catch {
+        // ignore — foreground activation is best-effort
+    }
+
+    SystemParametersInfoA(SPI_SETFOREGROUNDLOCKTIMEOUT, 0, previousTimeout, 0);
+    return isSuccessful;
+}
+
 export function trySetForegroundWindow(windowHandle: number): boolean {
     const hwnd = getHwndByHandle(windowHandle);
     if (hwnd) {
-        const timeout: [number] = [0];
-        SystemParametersInfoA(SPI_GETFOREGROUNDLOCKTIMEOUT, 0, timeout, 0);
-        SystemParametersInfoA(SPI_SETFOREGROUNDLOCKTIMEOUT, 0, [0], SPIF_SENDWININICHANGE | SPIF_UPDATEINIFILE);
-
-        const isSuccessful = SetForegroundWindow(hwnd);
-        SystemParametersInfoA(SPI_SETFOREGROUNDLOCKTIMEOUT, 0, timeout, SPIF_SENDWININICHANGE | SPIF_UPDATEINIFILE);
-        return isSuccessful;
+        return forceSetForegroundWindow(hwnd);
     }
     return false;
 }
@@ -915,25 +934,56 @@ export function sendKeyboardEvents(inputs: (KeyboardEvent['u']['ki'])[]): number
     })), sizeof(INPUT));
 }
 
-export async function withAttachedInput(hwnd: HWND, fn: () => Promise<void>): Promise<void> {
-    const currentThreadId = GetCurrentThreadId();
-    const targetThreadId = GetWindowThreadProcessId(hwnd, [null]);
-    AttachThreadInput(currentThreadId, targetThreadId, true);
+export interface AttachedInputHandle {
+    currentThreadId: DWORD;
+    targetThreadId: DWORD;
+    attached: boolean;
+}
 
-    const timeout: [number] = [0];
-    SystemParametersInfoA(SPI_GETFOREGROUNDLOCKTIMEOUT, 0, timeout, 0);
-    SystemParametersInfoA(SPI_SETFOREGROUNDLOCKTIMEOUT, 0, [0], SPIF_SENDWININICHANGE | SPIF_UPDATEINIFILE);
-
-    try {
-        SetForegroundWindow(hwnd);
-    } catch {
-        // ignore
+/**
+ * Attach the current thread's input queue to the target window's thread and bring
+ * that window to the foreground, so simulated input is delivered reliably.
+ *
+ * The window is resolved to its top-level root (GA_ROOT). WindowFromPoint returns
+ * the deepest child under the cursor (e.g. a button), while the window that must be
+ * activated is the owning top-level window (e.g. a modal dialog). Activating the
+ * wrong window — such as the session's pinned main window while a modal is up —
+ * makes Windows treat the injected click as a re-activation and swallow it.
+ *
+ * Returns a handle that must be released with detachForegroundInput, or null when
+ * there is no window to attach to.
+ */
+export function attachForegroundInput(hwnd: HWND | null): AttachedInputHandle | null {
+    if (!hwnd) {
+        return null;
     }
 
+    const root = GetAncestor(hwnd, GA_ROOT) || hwnd;
+    const currentThreadId = GetCurrentThreadId();
+    const targetThreadId = GetWindowThreadProcessId(root, [null]);
+
+    // AttachThreadInput fails when both thread ids are the same, so only attach
+    // when the target window lives on a different thread.
+    const attached = Boolean(targetThreadId)
+        && targetThreadId !== currentThreadId
+        && Boolean(AttachThreadInput(currentThreadId, targetThreadId, true));
+
+    forceSetForegroundWindow(root);
+
+    return { currentThreadId, targetThreadId, attached };
+}
+
+export function detachForegroundInput(handle: AttachedInputHandle | null): void {
+    if (handle?.attached) {
+        AttachThreadInput(handle.currentThreadId, handle.targetThreadId, false);
+    }
+}
+
+export async function withAttachedInput(hwnd: HWND | null, fn: () => Promise<void>): Promise<void> {
+    const handle = attachForegroundInput(hwnd);
     try {
         await fn();
     } finally {
-        AttachThreadInput(currentThreadId, targetThreadId, false);
-        SystemParametersInfoA(SPI_SETFOREGROUNDLOCKTIMEOUT, 0, timeout, SPIF_SENDWININICHANGE | SPIF_UPDATEINIFILE);
+        detachForegroundInput(handle);
     }
 }

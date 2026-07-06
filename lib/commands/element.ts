@@ -232,10 +232,13 @@ export async function click(this: NovaWindowsDriver, elementId: string): Promise
         coordinates.y = rect.y + rect.height / 2;
     }
 
-    await mouseMoveAbsolute(coordinates.x, coordinates.y, 0, easingFunction);
-    const hwnd = this.windowHandle ? getHwndByHandle(this.windowHandle) : getHwndByPoint(coordinates.x, coordinates.y);
+    await mouseMoveAbsolute(coordinates.x, coordinates.y, this.caps.delayBeforeClick ?? 0, easingFunction);
+    // Prefer the window actually under the click point (e.g. a modal dialog) over the
+    // session's pinned top-level window, so clicks on modals/popups activate and hit
+    // the right window instead of being swallowed as a re-activation of the owner.
+    const hwnd = getHwndByPoint(coordinates.x, coordinates.y) ?? (this.windowHandle ? getHwndByHandle(this.windowHandle) : null);
 
-    withAttachedInput(hwnd, async () => {
+    await withAttachedInput(hwnd, async () => {
         mouseDown();
         mouseUp();
     });
