@@ -941,6 +941,18 @@ export interface AttachedInputHandle {
 }
 
 /**
+ * Milliseconds to wait after activating the target window before injecting input.
+ *
+ * Bringing a window forward (or moving UIA focus onto it) is asynchronous: if the
+ * click is injected immediately it is consumed as an "activating click" and the
+ * control only receives focus — the "first click only focuses" behaviour on dialog
+ * buttons. v1.4.1 accidentally masked this because its registry-persisting
+ * foreground-lock SPI call was slow (~180ms); we keep just the settle delay without
+ * the expensive, user-profile-mutating registry write.
+ */
+const FOREGROUND_SETTLE_MS = 200;
+
+/**
  * Attach the current thread's input queue to the target window's thread and bring
  * that window to the foreground, so simulated input is delivered reliably.
  *
@@ -953,7 +965,7 @@ export interface AttachedInputHandle {
  * Returns a handle that must be released with detachForegroundInput, or null when
  * there is no window to attach to.
  */
-export function attachForegroundInput(hwnd: HWND | null): AttachedInputHandle | null {
+export async function attachForegroundInput(hwnd: HWND | null): Promise<AttachedInputHandle | null> {
     if (!hwnd) {
         return null;
     }
@@ -970,6 +982,10 @@ export function attachForegroundInput(hwnd: HWND | null): AttachedInputHandle | 
 
     forceSetForegroundWindow(root);
 
+    // Let the activation/focus change settle before the click is injected, otherwise
+    // the first click is consumed as an activating click and only focuses the control.
+    await sleep(FOREGROUND_SETTLE_MS);
+
     return { currentThreadId, targetThreadId, attached };
 }
 
@@ -980,7 +996,7 @@ export function detachForegroundInput(handle: AttachedInputHandle | null): void 
 }
 
 export async function withAttachedInput(hwnd: HWND | null, fn: () => Promise<void>): Promise<void> {
-    const handle = attachForegroundInput(hwnd);
+    const handle = await attachForegroundInput(hwnd);
     try {
         await fn();
     } finally {

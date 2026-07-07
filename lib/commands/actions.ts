@@ -64,7 +64,7 @@ export async function handleMousePointerActionSequence(this: NovaWindowsDriver, 
     // every press. Doing it per press (v1.4.1) spaced the individual clicks so far
     // apart that double-clicks stopped registering (issue #84). Attaching lazily on
     // the first button press means the pointer has already moved onto the target.
-    let inputHandle: ReturnType<typeof attachForegroundInput> = null;
+    let inputHandle: Awaited<ReturnType<typeof attachForegroundInput>> = null;
 
     try {
         for (const action of actions) {
@@ -75,7 +75,7 @@ export async function handleMousePointerActionSequence(this: NovaWindowsDriver, 
                     currentPos.y = action.y;
                     break;
                 case 'pointerDown':
-                    inputHandle ??= attachForegroundInput(getHwndByPoint(currentPos.x, currentPos.y));
+                    inputHandle ??= await attachForegroundInput(getHwndByPoint(currentPos.x, currentPos.y));
                     mouseDown(action.button);
                     break;
                 case 'pointerUp':
