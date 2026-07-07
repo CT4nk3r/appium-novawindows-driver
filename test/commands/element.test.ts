@@ -3,6 +3,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
+    click,
     getProperty,
     getAttribute,
     active,
@@ -17,11 +18,21 @@ import {
 } from '../../lib/commands/element';
 import { createMockDriver } from '../fixtures/driver';
 import { W3C_ELEMENT_KEY } from '@appium/base-driver';
+import {
+    mouseDown,
+    mouseUp,
+    getHwndByPoint,
+    getHwndByHandle,
+    withAttachedInput,
+} from '../../lib/winapi/user32';
 
 vi.mock('../../lib/winapi/user32', () => ({
     mouseDown: vi.fn(),
     mouseUp: vi.fn(),
     mouseMoveAbsolute: vi.fn().mockResolvedValue(undefined),
+    getHwndByPoint: vi.fn(),
+    getHwndByHandle: vi.fn(),
+    withAttachedInput: vi.fn(async (_hwnd: unknown, fn: () => Promise<void>) => { await fn(); }),
 }));
 
 const ELEMENT_ID = '1.2.3.4.5';
@@ -259,5 +270,46 @@ describe('getElementScreenshot', () => {
         );
         expect(decoded).toContain('BoundingRectangle');
         expect(decoded).toContain('CopyFromScreen');
+    });
+});
+
+describe('click', () => {
+    beforeEach(() => vi.clearAllMocks());
+
+    const setupDriver = () => {
+        const driver = createMockDriver() as any;
+        driver.caps = {};
+        driver.windowHandle = null;
+        // The focus lookup, SetFocus and clickable-point reads all go through
+        // sendPowerShellCommand; returning a clickable point keeps click() on the
+        // happy path so we can assert on the window-targeting behaviour.
+        driver.sendPowerShellCommand.mockResolvedValue('{"x":50,"y":60}');
+        return driver;
+    };
+
+    it('attaches input to the window under the click point, not the pinned window', async () => {
+        const driver = setupDriver();
+        driver.windowHandle = 999; // pinned main window — must be ignored when the point resolves
+        (getHwndByPoint as any).mockReturnValue(0xABC);
+
+        await click.call(driver, ELEMENT_ID);
+
+        expect(getHwndByPoint).toHaveBeenCalledWith(50, 60);
+        expect(getHwndByHandle).not.toHaveBeenCalled();
+        expect(withAttachedInput).toHaveBeenCalledWith(0xABC, expect.any(Function));
+        expect(mouseDown).toHaveBeenCalledTimes(1);
+        expect(mouseUp).toHaveBeenCalledTimes(1);
+    });
+
+    it('falls back to the pinned window handle when the point resolves to no window', async () => {
+        const driver = setupDriver();
+        driver.windowHandle = 999;
+        (getHwndByPoint as any).mockReturnValue(null);
+        (getHwndByHandle as any).mockReturnValue(777);
+
+        await click.call(driver, ELEMENT_ID);
+
+        expect(getHwndByHandle).toHaveBeenCalledWith(999);
+        expect(withAttachedInput).toHaveBeenCalledWith(777, expect.any(Function));
     });
 });

@@ -12,7 +12,7 @@ import {
 
 import { W3C_ELEMENT_KEY, errors } from '@appium/base-driver';
 import { NovaWindowsDriver } from '../driver';
-import { keyDown, keyUp, mouseMoveRelative, mouseMoveAbsolute, mouseDown, mouseUp, mouseScroll, withAttachedInput, getHwndByPoint } from '../winapi/user32';
+import { keyDown, keyUp, mouseMoveRelative, mouseMoveAbsolute, mouseDown, mouseUp, mouseScroll, withAttachedInput, getHwndByPoint, attachForegroundInput, detachForegroundInput } from '../winapi/user32';
 import { sleep } from '../util';
 import { AutomationElement, FoundAutomationElement } from '../powershell';
 import { Key } from '../enums';
@@ -59,27 +59,39 @@ export async function handlePointerActionSequence(this: NovaWindowsDriver, actio
 
 export async function handleMousePointerActionSequence(this: NovaWindowsDriver, actionSequence: PointerActionSequence, currentPos: { x: number, y: number }): Promise<void> {
     const actions = actionSequence.actions;
-    for (const action of actions) {
-        switch (action.type) {
-            case 'pointerMove':
-                await this.handleMouseMoveAction(action);
-                currentPos.x = action.x;
-                currentPos.y = action.y;
-                break;
-            case 'pointerDown':
-                await withAttachedInput(getHwndByPoint(currentPos.x, currentPos.y), async () => mouseDown(action.button));
-                break;
-            case 'pointerUp':
-                await withAttachedInput(getHwndByPoint(currentPos.x, currentPos.y), async () => mouseUp(action.button));
-                break;
-            case 'pause':
-                if (action.duration) {
-                    await sleep(action.duration);
-                }
-                break;
-            default:
-                throw new errors.InvalidArgumentError();
+
+    // Attach input to / activate the target window once for the whole gesture, not on
+    // every press. Doing it per press (v1.4.1) spaced the individual clicks so far
+    // apart that double-clicks stopped registering (issue #84). Attaching lazily on
+    // the first button press means the pointer has already moved onto the target.
+    let inputHandle: Awaited<ReturnType<typeof attachForegroundInput>> = null;
+
+    try {
+        for (const action of actions) {
+            switch (action.type) {
+                case 'pointerMove':
+                    await this.handleMouseMoveAction(action);
+                    currentPos.x = action.x;
+                    currentPos.y = action.y;
+                    break;
+                case 'pointerDown':
+                    inputHandle ??= await attachForegroundInput(getHwndByPoint(currentPos.x, currentPos.y));
+                    mouseDown(action.button);
+                    break;
+                case 'pointerUp':
+                    mouseUp(action.button);
+                    break;
+                case 'pause':
+                    if (action.duration) {
+                        await sleep(action.duration);
+                    }
+                    break;
+                default:
+                    throw new errors.InvalidArgumentError();
+            }
         }
+    } finally {
+        detachForegroundInput(inputHandle);
     }
 }
 
